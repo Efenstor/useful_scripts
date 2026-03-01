@@ -18,5 +18,6 @@ if [ ! "$1" ]; then
 else
   str="$1"
 fi
-barcode -b $str -S | imv -
+
+barcode -b $str -S | imv-x11 -
 

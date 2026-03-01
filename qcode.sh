@@ -18,4 +18,7 @@ if [ ! "$1" ]; then
 else
   str="$1"
 fi
-qrencode "$str" -o - | imv -
+
+echo "Press q to quit"
+qrencode "$str" -o - | imv-x11 -
+
