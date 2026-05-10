@@ -1,5 +1,6 @@
 #!/bin/sh
-# Copyleft 2026 Efenstor
+# Copyleft Efenstor
+# revision 2026.05.10
 
 # Default page size
 page_width_default=297
@@ -7,6 +8,7 @@ page_height_default=210
 
 # Misc
 system_required="gs pdfjam"
+dpi=72
 
 findpkg() {
   if which "apt-file" > /dev/null; then
@@ -21,6 +23,23 @@ findpkg() {
   fi
 }
 
+combine_halves() {
+  input_left="$split_pages_dir"/"$n"L.pdf
+  input_right="$split_pages_dir"/"$n"R.pdf
+  outfile="$split_pages_dir"/$(printf "%04d" $n)_$1.pdf
+  if [ "$2" != 0 ] || [ "$3" != 0 ]; then
+    out="shift.pdf"
+  else
+    out="$outfile"
+  fi
+  echo "Combining halves"
+  pdfjam -q "$input_left" "$input_right" --nup 2x1 --landscape --outfile "$out"
+  if [ "$2" != 0 ] || [ "$3" != 0 ]; then
+    echo "Applying shift"
+    gs -sDEVICE=pdfwrite -o "$outfile" -dPDFSETTINGS=/prepress -c "<</PageOffset [$2 $3]>> setpagedevice" -f "$out"
+  fi
+}
+
 # Check for the system requirements
 for i in $system_required
 do
@@ -31,23 +50,46 @@ do
   fi
 done            
 
+# Parse the named parameters
+direct_order=0
+back_hshift=0
+back_vshift=0
+optstr="?dh:v:"
+while getopts $optstr opt; do
+  case "$opt" in
+    d) direct_order=1 ;;
+    h) back_hshift=$(echo "$OPTARG * ($dpi / 25.4)" | bc -l) ;;
+    v) back_vshift=$(echo "$OPTARG * ($dpi / 25.4)" | bc -l) ;;
+    :) echo "Missing argument for -$OPTARG" >&2
+       exit 1
+       ;;
+  esac
+done
+shift $((OPTIND - 1))
+
 # Help
 if [ $# -lt 2 ]; then
   echo "
 Cut and rearrange PDF files with booklet page spreads into sheets for printing
 
-Usage: make_booklet.sh <src_base_name> <dest_base_name>
+Usage: make_booklet.sh [options] <src_base_name> <dest_base_name>
 
 Base name is the first portion of file name, which may be preceded by path.
 For example, for files named booklet01.pdf, booklet02.pdf, etc. specify base
 name \"booklet\": all files beginning with \"booklet\" will be used in
 numerical order.
+
+Options:
+  -d: Use direct page order (default is reversed)
+  -h <mm>: Shift back pages horizontally (positive values shift right)
+  -v <mm>: Shift back pages vertically (positive values shift up)
+  
+NOTE: Print multiple copies with the \"Collate\" option!
 "
   exit
 fi
 
 # Default page size
-dpi=72
 pw_pt_default=$(echo "$page_width_default * ($dpi / 25.4)" | bc -l)
 ph_pt_default=$(echo "$page_height_default * ($dpi / 25.4)" | bc -l)
 
@@ -58,6 +100,7 @@ dst_dir=$(dirname "$2")
 dst_base=$(basename "$2")
 
 # Make the list of source PDF files
+echo "Making the list of source PDF files"
 files=$(find "$src_dir" -maxdepth 1 -type f -iname "$src_base*.pdf" | sort -n -f)
 files_cnt=$(echo "$files" | wc -l)
 if [ $(( $files_cnt - $files_cnt / 2 * 2 )) -eq 1 ]; then
@@ -65,10 +108,26 @@ if [ $(( $files_cnt - $files_cnt / 2 * 2 )) -eq 1 ]; then
   exit
 fi
 
+# Make the destination directory
+if [ ! -d "$dst_dir" ]; then
+  echo "Making the destination directory"
+  mkdir "$dst_dir"
+  if [ $? -ne 0 ]; then
+    echo "Cannot make the destination directory \"$dst_dir\""
+    exit
+  fi
+fi
+
 # Make a temporary directory
+echo "Making a temporary directory"
 split_pages_dir=$(mktemp -d -p "$dst_dir")
+if [ $? -ne 0 ]; then
+  echo "Cannot make a temporary directory \"split_pages_dir\""
+  exit
+fi
 
 # Split pages into left and right halves
+echo "Splitting pages into left and right halves"
 n=1
 while [ -n "$files" ]; do
   f=$(echo "$files" | head -n 1)
@@ -115,22 +174,51 @@ while [ -n "$files" ]; do
   files=$(echo "$files" | tail -n +2)  # Trim file list
 done
 
-# Make destination directory
-if [ ! -d "$dst_dir" ]; then
-  mkdir "$dst_dir"
+# Combine the halves
+echo "Combining the halves into sheets"
+if [ $direct_order -eq 0 ]; then
+  # Reverse page order (default)
+  n=$(( $files_cnt - 1 ))
+  fronts=
+  while [ $n -ge 1 ]; do
+    combine_halves "front" 0 0
+    fronts="$fronts \"$outfile\""
+    n=$(( $n - 2 ))
+  done
+  n=$files_cnt
+  backs=
+  while [ $n -ge 1 ]; do
+    combine_halves "back" $back_hshift $back_vshift
+    backs="$backs \"$outfile\"" 
+    n=$(( $n - 2 ))
+  done
+else
+  # Direct page order
+  n=1
+  fronts=
+  while [ $n -le $files_cnt ]; do
+    combine_halves "front" 0 0
+    fronts="$fronts \"$outfile\""
+    n=$(( $n + 2 ))
+  done
+  n=2
+  backs=
+  while [ $n -le $files_cnt ]; do
+    combine_halves "back" $back_hshift $back_vshift
+    backs="$backs \"$outfile\""
+    n=$(( $n + 2 ))
+  done
 fi
 
-# Combine pages
-n=1
-outfiles=
-while [ $n -le $files_cnt ]; do
-  input_left="$split_pages_dir"/"$n"L.pdf
-  input_right="$split_pages_dir"/"$n"R.pdf
-  outfile="$dst_dir"/"$dst_base"_$(printf "%04d" $n).pdf
-  pdfjam -q "$input_left" "$input_right" --nup 2x1 --landscape --outfile "$outfile" 
-  n=$(( $n + 1 ))
-done
+# Join the pages
+echo "Joining the sheets into the final documents"
+eval gs -dNOPAUSE -sDEVICE=pdfwrite -sOUTPUTFILE="$dst_dir"/"$dst_base"_front.pdf -dBATCH "$fronts"
+eval gs -dNOPAUSE -sDEVICE=pdfwrite -sOUTPUTFILE="$dst_dir"/"$dst_base"_back.pdf -dBATCH "$backs"
 
 # Delete the temporary dir
+echo "Removing the temporary directory"
 rm -rf "$split_pages_dir"
+if [ $? -ne 0 ]; then
+  echo "Cannot remove the temporary directory \"$split_pages_dir\""
+fi
 
